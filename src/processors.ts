@@ -87,7 +87,7 @@ interface Manifest {
     input_schema?: JsonSchema;
     output_schema?: JsonSchema;
     methods?: string[];
-    secrets?: Array<{ name: string; host?: string }>;
+    secrets?: Array<{ name: string; host?: string; hosts?: string[]; mode?: string }>;
     [k: string]: unknown;
 }
 
@@ -201,6 +201,26 @@ const emit = (flags: Flags, value: unknown): boolean => {
     console.log(JSON.stringify(value, null, 2));
     return true;
 };
+
+
+/**
+ * Warn, once, when a manifest declares `mode: 'env'` secrets.
+ *
+ * Printed at deploy and update because that is the moment the publisher chooses it, and the choice is a
+ * real downgrade: an injected secret never enters their isolate, while an env one does. Adversarial
+ * review asked for this explicitly — the two modes must not look like a formatting preference.
+ */
+function warnEnvSecrets(manifest: Manifest): void {
+    const envNames = (manifest.secrets ?? [])
+        .filter((s) => s.mode === 'env')
+        .map((s) => s.name);
+    if (!envNames.length) return;
+    ok('');
+    ok(`note: ${envNames.join(', ')} ${envNames.length === 1 ? 'is' : 'are'} declared mode: "env".`);
+    ok('      Your code can read the value. That means it can also print it into your logs, or send');
+    ok('      it to any host in your egress allowlist — we cannot stop either. Use "inject" for');
+    ok('      anything that is only ever an outbound header.');
+}
 
 // ─── Source resolution: single file, bundle, or multi-file ─────────────────
 
@@ -474,6 +494,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             ok();
             ok(`try it:   singularity processors run '{"hello":"world"}'`);
             ok('go live:  singularity processors publish');
+            warnEnvSecrets(manifest);
             break;
         }
 
@@ -488,6 +509,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             if (emit(flags, res)) break;
             ok(`updated  ${slug}  (config_rev ${res.config_rev})`);
             if (res.note) ok(res.note);
+            warnEnvSecrets(manifest);
             break;
         }
 
@@ -573,7 +595,11 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             );
             if (emit(flags, res)) break;
             ok(`secrets set: ${res.secrets.join(', ') || '(none)'}`);
-            ok('values are write-only — never returned, injected on egress');
+            ok('values are write-only here — we never return them to you');
+            // Said at the moment the credential arrives, not only at deploy: "injected on egress" is
+            // no longer true for every secret, and a blanket claim would now be a false assurance.
+            if (existsSync('processor.json')) warnEnvSecrets(loadManifest(flags));
+            else ok('run `singularity processors env list` to see which are injected and which your code reads');
             break;
         }
 
@@ -583,25 +609,36 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             const action = words[1] || 'list';
 
             if (action === 'list') {
-                // Which names are DECLARED (from the manifest) and which of those actually have a
-                // value. Before this, `secrets set` was the only surface that ever reported the
-                // second fact, so anyone who did not save that output had no way to answer "is
-                // OPENAI_API_KEY set?" except to set it again and hope.
-                const d = await api<{ manifest?: Manifest; secret_keys?: string[] }>(
-                    BASE, 'GET', `/processors/${slug}`, { kp },
-                );
+                // Which names are DECLARED (from the manifest), which have a value, and — since
+                // secrets[].mode exists — WHICH ONES YOUR OWN CODE CAN READ. That last column is the
+                // whole security difference between the two modes, and it was previously visible
+                // nowhere except the manifest file the publisher may not have open.
+                const d = await api<{
+                    manifest?: Manifest;
+                    secret_keys?: string[];
+                    secret_modes?: Record<string, string>;
+                }>(BASE, 'GET', `/processors/${slug}`, { kp });
                 const declared = d.manifest?.secrets ?? [];
                 const set = new Set(d.secret_keys ?? []);
-                if (emit(flags, { declared: declared.map((s) => s.name), set: [...set] })) break;
+                const modes = d.secret_modes ?? {};
+                if (emit(flags, { declared: declared.map((s) => s.name), set: [...set], modes })) break;
                 if (!declared.length) {
                     ok('no secrets declared — add them to manifest.secrets, then set values');
                     break;
                 }
                 for (const s of declared) {
-                    ok(`${set.has(s.name) ? 'set    ' : 'unset  '} ${s.name.padEnd(28)} ${s.host ? `-> ${s.host}` : ''}`);
+                    const mode = modes[s.name] ?? s.mode ?? 'inject';
+                    const where = mode === 'env'
+                        ? 'readable by your code'
+                        : `injected -> ${(s.hosts ?? []).join(', ') || s.host || '(no host)'}`;
+                    ok(`${set.has(s.name) ? 'set    ' : 'unset  '} ${s.name.padEnd(24)} ${mode.padEnd(7)} ${where}`);
                 }
                 ok('');
-                ok('values are never readable, by you or by your code — they are injected on egress');
+                ok('inject  the value never enters your isolate; the gateway adds the header for you');
+                if (Object.values(modes).includes('env')) {
+                    ok('env     YOUR CODE HOLDS THIS VALUE. Printing it puts it in your logs, and we');
+                    ok('        cannot stop it being sent anywhere your egress allowlist permits.');
+                }
                 break;
             }
 
