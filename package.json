@@ -1,6 +1,6 @@
 {
     "name": "@singularity-layer/cli",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Singularity developer CLI \u2014 deploy paid endpoints (Processors) on the Singularity Cloud Network",
     "type": "module",
     "bin": {
