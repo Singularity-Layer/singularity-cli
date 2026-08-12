@@ -79,8 +79,55 @@ singularity processors env list                 # which are declared, which are 
 singularity processors env unset OPENAI_API_KEY
 ```
 
-Values are write-only. They are never returned — not to you, not to your code — and the egress
-gateway injects them into outbound requests to the host you bound them to.
+Values are write-only *to you*: we never hand one back through the API.
+
+**Two modes, chosen per secret.** The default is the strong one:
+
+```json
+"secrets": [
+  { "name": "OPENAI_API_KEY", "hosts": ["api.openai.com"],
+    "inject": { "header": "Authorization", "format": "Bearer {value}" } },
+  { "name": "SIGNING_KEY", "mode": "env" }
+]
+```
+
+`inject` (the default) — **the value never enters your isolate.** You call `fetch()` with no
+credential and the egress gateway adds the header server-side, for the hosts you declared and nowhere
+else. Code that never holds a key cannot leak the key.
+
+`mode: "env"` — **your code holds the value**, via `await SGL.secrets.get('SIGNING_KEY')`. This is a
+real downgrade and it is opt-in for exactly that reason: once your code has the value it can print it
+into your logs, or send it to any host in your egress allowlist, and we cannot stop either. Use it
+only for credentials that genuinely cannot be an outbound header — a key you sign with locally, or a
+value an SDK insists on reading itself. The alternative most people reach for otherwise is
+hard-coding the secret in their source, which is worse in every way.
+
+`singularity processors env list` shows which of yours is which.
+
+## Processor state
+
+A processor is a fresh isolate every run, so anything you want to keep has to go somewhere:
+
+```js
+// Key/value — a cursor, a cache, a dedupe set. Values are opaque strings, byte-exact.
+await SGL.kv.put('cursor', '2026-08-12');
+const cursor = await SGL.kv.get('cursor');
+
+// Compare-and-swap, for a counter or a lock. Concurrent runs are the normal case.
+const cur = await SGL.kv.getWithVersion('count');
+await SGL.kv.put('count', String(Number(cur.value) + 1), { ifVersion: cur.version });
+
+// Objects — a generated PDF, an image, a dataset.
+await SGL.files.put('reports/august.pdf', bytes, { contentType: 'application/pdf' });
+const { url } = await SGL.files.downloadUrl('reports/august.pdf', { ttlSeconds: 3600 });
+```
+
+`downloadUrl` gives you a signed, expiring link a buyer can fetch with **no credential**. It is
+always served as an attachment with a forced `application/octet-stream` type — your declared type is
+never echoed — so a stored HTML or SVG file cannot execute. Treat it as a bearer link: anyone who
+gets it can download until it expires.
+
+None of this needs an `egress.allow` entry. It is not the network.
 
 ### Turning it off without losing it
 
