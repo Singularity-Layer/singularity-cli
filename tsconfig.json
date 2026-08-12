@@ -1,0 +1,23 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "lib": ["ES2022"],
+        "types": ["node"],
+        "strict": true,
+        "noUncheckedIndexedAccess": true,
+        "noImplicitOverride": true,
+        "declaration": true,
+        "declarationDir": "dist",
+        "emitDeclarationOnly": true,
+        "outDir": "dist",
+        "skipLibCheck": true,
+        "verbatimModuleSyntax": true
+    },
+    "include": ["src"],
+    // Tests are typechecked (they are under src) but MUST NOT emit declarations: dist/cli.test.d.ts
+    // was shipping in the published tarball, which is noise at best and a hint to consumers that a
+    // test file is part of the API at worst. `npm pack --dry-run` is what showed it.
+    "exclude": ["src/**/*.test.ts"]
+}

@@ -1,0 +1,78 @@
+{
+    "name": "@singularity-layer/cli",
+    "version": "0.2.0",
+    "description": "Singularity developer CLI \u2014 deploy paid endpoints (Processors) on the Singularity Cloud Network",
+    "type": "module",
+    "bin": {
+        "singularity": "./dist/cli.js"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "engines": {
+        "node": ">=20"
+    },
+    "scripts": {
+        "build": "node build.mjs",
+        "test": "vitest run",
+        "typecheck": "tsc --noEmit",
+        "prepublishOnly": "npm run typecheck && npm test && npm run build"
+    },
+    "dependencies": {
+        "esbuild": "^0.25.0",
+        "tweetnacl": "^1.0.3"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "typescript": "^5.6.0",
+        "vitest": "^2.1.9"
+    },
+    "keywords": [
+        "singularity",
+        "processors",
+        "x402",
+        "serverless",
+        "agents",
+        "solana",
+        "mcp"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Singularity-Layer/singularity-cli.git"
+    },
+    "//": [
+        "PACKAGE NAME vs COMMAND NAME are deliberately different. The bare `singularity` name on npm",
+        "belongs to someone else, so the package is scoped \u2014 matching the rest of the family. The BIN",
+        "is still `singularity`, so users type what they expect.",
+        "",
+        "esbuild is a RUNTIME dependency, not a build-time one: the CLI bundles the publisher's processor",
+        "for them. That is what makes npm packages and multi-file TypeScript processors possible at all \u2014",
+        "bundling happens on the publisher's machine, because running `npm install` on our infrastructure",
+        "would mean executing arbitrary postinstall scripts on a box holding platform credentials.",
+        "",
+        "THIS REPO IS PUBLIC ON PURPOSE. People hand this CLI a Solana keypair, so the code that signs with",
+        "it should be readable, and npm provenance \u2014 which attests the tarball was built from a named commit",
+        "by the release workflow \u2014 is only available for public sources.",
+        "",
+        "This is the DEVELOPER CLI: one command, subcommands per product. It is deliberately NOT:",
+        "  \u2022 `sgl`      \u2014 the Rust node-operator daemon. Different audience and runtime, and its",
+        "                 releases are hash-allowlisted, so coupling would slow both.",
+        "  \u2022 `sglcode`  \u2014 the agentic coding CLI, a product in its own right.",
+        "The rule that stops sprawl: new capabilities become SUBCOMMANDS here, never new binaries."
+    ],
+    "homepage": "https://github.com/Singularity-Layer/singularity-cli#readme",
+    "bugs": {
+        "url": "https://github.com/Singularity-Layer/singularity-cli/issues"
+    }
+}

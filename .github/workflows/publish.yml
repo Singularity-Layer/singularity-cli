@@ -1,0 +1,84 @@
+name: Publish to npm
+
+# Publishes @singularity-layer/cli when a GitHub Release tagged v* is published.
+#
+# Requires repo secret NPM_TOKEN — an npm automation token with publish rights on the
+# @singularity-layer scope. Tag the release to match package.json "version" (e.g. v0.2.1); the job
+# REFUSES to publish if they disagree, because an npm version is immutable once published.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  # Required for npm provenance: the workflow exchanges this for a signed attestation linking the
+  # published tarball to this repo, this commit and this workflow run. It is the reason this repo is
+  # public — provenance is unavailable for private sources, and the people installing this hand it a
+  # wallet keypair, so "prove the tarball came from the code I can read" is worth more than secrecy.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: npm ci
+
+      # THE TAG MUST MATCH package.json, checked before any build work so the failure is instant.
+      # An npm version cannot be corrected, only superseded, and anything pinned to the tag would
+      # then install a version that does not exist.
+      #
+      # The tag is read as an ENV VAR, never interpolated into the script with ${{ }} directly in a
+      # run: line — a tag name is attacker-influenceable input, and interpolation splices it into the
+      # shell source rather than passing it as data.
+      - name: Verify the tag matches the package version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="${TAG_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::release tag v$TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          echo "publishing $PKG"
+
+      # VERSION is duplicated in src/version.ts because the CLI must print it without reading
+      # package.json at runtime — the bundle has no package.json beside it. Duplication that drifts is
+      # worse than none, so it is checked rather than trusted.
+      - name: Verify src/version.ts agrees
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          grep -q "VERSION = '$PKG'" src/version.ts \
+            || { echo "::error::src/version.ts does not say $PKG"; exit 1; }
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke check what will be published
+        # The last gate before an immutable version. `--version` proves the bundle loads; the
+        # subcommand help proves the command table wired up; the library import proves dist/index.js
+        # did not pull in cli.ts, which calls main() at import time and would exit a consumer's process.
+        run: |
+          node dist/cli.js --version
+          node dist/cli.js processors > /dev/null
+          node -e "import('./dist/index.js').then(m => { if (!m.bundleProcessor || !m.usd) throw new Error('library entry is broken'); })"
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

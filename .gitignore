@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.tgz
+
+# Holds a processor INVOKE TOKEN when the CLI is used inside this repo. Never commit one.
+.singularity.json
