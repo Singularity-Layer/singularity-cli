@@ -73,7 +73,21 @@ export const HELP = `singularity processors — deploy loops we host and run
   --slug <slug>            when not run from a processor directory
   --json                   machine-readable output, for scripts and agents
   --bundle                 bundle with esbuild: imports and npm packages
-  --entry <file>           bundle entry (default: the manifest's $code)`;
+  --entry <file>           bundle entry (default: the manifest's $code)
+
+Getting paid. Buyers pay YOU directly — we never hold the money and take no cut. By default that
+is USDC on Solana at your signing wallet. To be paid on more than one chain, add a "payout" block
+to processor.json:
+
+  "payout": {
+    "solana":    "<base58 wallet>",        USDC
+    "base":      "0x…",                    USDC
+    "robinhood": "0x…"                     USDG on Robinhood Chain
+  }
+
+One price_usd covers all three (every asset is 6-decimal), and buyers pick a chain from the 402.
+Name only the chains you want: a chain you leave out is never offered. Check each address twice —
+a payment cannot be reversed.`;
 
 interface Manifest {
     $code?: string;
@@ -84,11 +98,52 @@ interface Manifest {
     description?: string;
     lane?: string;
     price_usd?: string;
+    /**
+     * Where buyers pay you, per chain. Omit it and you are paid in USDC on Solana at your signing
+     * wallet, which is what every processor did before this existed.
+     */
+    payout?: Partial<Record<PayoutChain, string>>;
     input_schema?: JsonSchema;
     output_schema?: JsonSchema;
     methods?: string[];
     secrets?: Array<{ name: string; host?: string; hosts?: string[]; mode?: string }>;
     [k: string]: unknown;
+}
+
+/**
+ * The chains a buyer can pay on. USDC on Solana and Base, USDG on Robinhood Chain — all three are
+ * 6-decimal stablecoins, so ONE `price_usd` is the price everywhere with no conversion.
+ */
+export type PayoutChain = 'solana' | 'base' | 'robinhood';
+const PAYOUT_CHAINS: PayoutChain[] = ['solana', 'base', 'robinhood'];
+
+/**
+ * Check a payout address BEFORE it is deployed.
+ *
+ * SHAPE ONLY, and the limit is deliberate. The server validates these too, including the EIP-55
+ * checksum, and its check is the one that counts. This one exists because the CLI is where a human
+ * pastes an address, and catching "that is not a Solana address" without a round trip is worth a few
+ * lines. One wrong character sends every sale for the life of the processor somewhere nobody controls.
+ *
+ * EIP-55 IS NOT VERIFIED HERE, on purpose: it needs keccak256, and adding a hash implementation — or a
+ * dependency — to a CLI that people hand a Solana keypair to costs more than it saves. Deploy rejects a
+ * bad checksum and names the address it thinks you meant.
+ *
+ * NOTHING IS CASE-FOLDED. base58 is case-sensitive, so a lowercased Solana address is a DIFFERENT
+ * account that still looks valid; and an EVM address's case IS its checksum.
+ */
+export function checkPayoutAddress(chain: PayoutChain, value: unknown): string | null {
+    if (typeof value !== 'string' || !value.trim()) return 'must be a non-empty string';
+    const addr = value.trim();
+    if (chain === 'solana') {
+        // base58 excludes 0, O, I and l. 32-44 characters covers every real pubkey.
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) return 'must be a base58 Solana address';
+        return null;
+    }
+    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) return 'must be a 0x-prefixed 20-byte hex address';
+    // The zero address is a burn: accepting it means every sale is destroyed, silently.
+    if (/^0x0{40}$/.test(addr)) return 'the zero address cannot receive payment';
+    return null;
 }
 
 interface JsonSchema {
@@ -177,7 +232,29 @@ const readConfig = (): Config => {
 function loadManifest(flags: Flags): Manifest {
     const p = resolve(String(flags.manifest || 'processor.json'));
     if (!existsSync(p)) die(`no manifest at ${p} — run \`singularity processors init\` first`);
-    try { return JSON.parse(readFileSync(p, 'utf8')) as Manifest; } catch { return die(`${p} is not valid JSON`); }
+    let m: Manifest;
+    try { m = JSON.parse(readFileSync(p, 'utf8')) as Manifest; } catch { return die(`${p} is not valid JSON`); }
+    checkPayout(m);
+    return m;
+}
+
+/** Refuse a malformed payout map here, where the address was typed, rather than after a round trip. */
+function checkPayout(m: Manifest): void {
+    if (m.payout === undefined) return;
+    if (typeof m.payout !== 'object' || m.payout === null || Array.isArray(m.payout)) {
+        die('payout must be an object keyed by chain, e.g. { "solana": "…", "base": "0x…" }');
+    }
+    const entries = Object.entries(m.payout as Record<string, unknown>);
+    if (entries.length === 0) {
+        die('payout names no chain — remove it entirely to be paid in USDC on Solana at your signing wallet');
+    }
+    for (const [chain, value] of entries) {
+        if (!PAYOUT_CHAINS.includes(chain as PayoutChain)) {
+            die(`payout.${chain}: unknown chain — supported: ${PAYOUT_CHAINS.join(', ')}`);
+        }
+        const problem = checkPayoutAddress(chain as PayoutChain, value);
+        if (problem) die(`payout.${chain}: ${problem}`);
+    }
 }
 
 /** Strip our `$`-prefixed local hints so the server sees a clean manifest. */
@@ -778,7 +855,17 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             const res = await api<EarningsRes>(BASE, 'GET', `/processors/${slug}/earnings`, { kp });
             if (emit(flags, res)) break;
 
-            ok(`Sales      $${usd(res.sales.total_micro)}  (${res.sales.count} paid runs, sent to ${res.sales.paid_to})`);
+            const byChain = res.sales.paid_to_by_chain;
+            if (byChain && Object.keys(byChain).length > 1) {
+                // More than one chain means "where did my money go?" has more than one answer, and a
+                // single address would make a Base sale look unaccounted for.
+                ok(`Sales      $${usd(res.sales.total_micro)}  (${res.sales.count} paid runs)`);
+                for (const [chain, addr] of Object.entries(byChain)) {
+                    ok(`           ${chain.padEnd(10)} ${addr}`);
+                }
+            } else {
+                ok(`Sales      $${usd(res.sales.total_micro)}  (${res.sales.count} paid runs, sent to ${res.sales.paid_to})`);
+            }
             ok(`Compute    $${usd(res.runtime.spent_micro)}  spent from your credit balance`);
             if (res.runtime.held_open_micro > 0) {
                 ok(`Held       $${usd(res.runtime.held_open_micro)}  reserved for runs still in flight`);
@@ -894,6 +981,8 @@ interface RunsPage {
 interface EarningsRes {
     sales: {
         total_micro: number; count: number; paid_to: string;
+        /** Per chain. Older servers omit it, hence the fallback above. */
+        paid_to_by_chain?: Partial<Record<PayoutChain, string>>;
         recent?: Array<{ created_at: string; price_micro: number; settle_tx: string | null }>;
     };
     runtime: { spent_micro: number; held_open_micro: number };

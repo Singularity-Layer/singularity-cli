@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { parseArgs, bs58, prompt } from './auth.js';
 import { usd, coerce } from './format.js';
 import { bundleProcessor } from './bundle.js';
+import { checkPayoutAddress } from './processors.js';
 
 // ─── Argument parsing ──────────────────────────────────────────────────────
 
@@ -311,5 +312,35 @@ describe('prompt', () => {
         expect(piped.out).toContain('hello\n');
         const typed = await withStdin(['hello\n'], true, () => prompt('name'));
         expect(typed.out).toBe('name: ');
+    });
+});
+
+// ─── Payout addresses: the one field where a typo is unrecoverable ──────────
+
+describe('payout address checks', () => {
+    it('accepts a base58 Solana address and a checksummed EVM address', () => {
+        expect(checkPayoutAddress('solana', '3TeWgRN8ZpZ2y36rfMBxZuyah116KSTZrAmK5ttdScjJ')).toBeNull();
+        expect(checkPayoutAddress('base', '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913')).toBeNull();
+        expect(checkPayoutAddress('robinhood', '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913')).toBeNull();
+    });
+
+    it('rejects the wrong address shape for the chain', () => {
+        expect(checkPayoutAddress('solana', '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913')).toBeTruthy();
+        expect(checkPayoutAddress('base', '3TeWgRN8ZpZ2y36rfMBxZuyah116KSTZrAmK5ttdScjJ')).toBeTruthy();
+    });
+
+    it('rejects the zero address, which would burn every sale silently', () => {
+        expect(checkPayoutAddress('base', `0x${'0'.repeat(40)}`)).toBeTruthy();
+    });
+
+    it('rejects empty and non-string values rather than deploying them', () => {
+        for (const bad of ['', '   ', null, undefined, 42, {}]) {
+            expect(checkPayoutAddress('base', bad), String(bad)).toBeTruthy();
+        }
+    });
+
+    it('accepts an all-lowercase EVM address, which carries no checksum to fail', () => {
+        // EIP-55 is enforced server-side; the CLI has no keccak256 and says so rather than pretending.
+        expect(checkPayoutAddress('base', '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913')).toBeNull();
     });
 });
