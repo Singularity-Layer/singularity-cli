@@ -9,7 +9,7 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { api, loadKeypair, die, ok, prompt, type Flags, type Keypair } from './auth.js';
+import { api, loadKeypair, loadCreds, hasAnyCredential, die, ok, prompt, type Flags, type Creds } from './auth.js';
 import { bundleProcessor } from './bundle.js';
 import { usd, when, coerce } from './format.js';
 
@@ -22,7 +22,7 @@ import { usd, when, coerce } from './format.js';
  */
 const DEFAULT_BASE = 'https://sgl-processors.ivaavimusicproductions.workers.dev';
 
-function resolveBase(flags: Flags): string {
+export function resolveBase(flags: Flags): string {
     const override = (typeof flags.base === 'string' && flags.base)
         || process.env.SINGULARITY_PROCESSORS_URL;
     if (override) {
@@ -465,7 +465,7 @@ function toQuery(input: unknown): Record<string, string | number | Array<string 
  */
 async function invokeAndWait(
     base: string, slug: string, input: Record<string, unknown> | unknown,
-    kp: Keypair, token: string, quiet: boolean, asGet = false,
+    creds: Creds, token: string, quiet: boolean, asGet = false,
 ): Promise<RunResult> {
     // A GET run, for a processor that declares `methods: ["GET"]` — the shape agents and browsers
     // reach for first, and un-runnable from this CLI until now.
@@ -474,11 +474,16 @@ async function invokeAndWait(
     // for a GET, because that is where a GET's input lives. Signing '' would leave the input
     // unauthenticated; signing the query on any OTHER GET route 401s, because those verify against ''.
     let res = asGet
+        // THE API KEY IS DELIBERATELY NOT SENT HERE. `run` is the one route that refuses to read a
+        // key as an ownership claim (it has both a money path and an anonymous buyer lane), so the
+        // server ignores the header — and shipping a long-lived full-control credential to a route
+        // that never reads it is exposure for nothing. Under a key this is the INVOKE-TOKEN lane,
+        // which means a paused processor answers 503 rather than letting you verify a fix.
         ? await api<RunResult>(base, 'GET', `/processors/${slug}/run`, {
-            query: toQuery(input), kp, bearer: token, signQuery: true,
+            query: toQuery(input), ...(creds.kp ? { kp: creds.kp } : {}), bearer: token, signQuery: true,
         })
         : await api<RunResult>(base, 'POST', `/processors/${slug}/run`, {
-            body: { input }, kp, bearer: token,
+            body: { input }, ...(creds.kp ? { kp: creds.kp } : {}), bearer: token,
         });
 
     if (res.status !== 'completed' && res.run_token && res.run_id) {
@@ -556,11 +561,11 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'deploy': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const manifest = loadManifest(flags);
             const source = await resolveSource(manifest, flags);
             const res = await api<{ slug: string; invoke_token: string }>(BASE, 'POST', '/processors', {
-                body: { manifest: clean(manifest), ...source }, kp,
+                body: { manifest: clean(manifest), ...source }, ...creds,
             });
             writeState({ slug: res.slug, invoke_token: res.invoke_token });
             if (emit(flags, res)) break;
@@ -576,12 +581,12 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'update': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const manifest = loadManifest(flags);
             const slug = String(flags.slug || manifest.slug || die('no slug in processor.json'));
             const source = await resolveSource(manifest, flags);
             const res = await api<{ config_rev: number; note?: string }>(
-                BASE, 'PATCH', `/processors/${slug}`, { body: { manifest: clean(manifest), ...source }, kp },
+                BASE, 'PATCH', `/processors/${slug}`, { body: { manifest: clean(manifest), ...source }, ...creds },
             );
             if (emit(flags, res)) break;
             ok(`updated  ${slug}  (config_rev ${res.config_rev})`);
@@ -601,7 +606,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             const token = String(flags.token || readState().invoke_token || '');
             if (!token) die(`no invoke token in ${STATE_FILE} — run \`singularity processors rotate\``);
 
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             let input: unknown = {};
             // `call` is the interactive spelling of `run`, so it prompts by default — but an
             // argument still wins, so `call '{"n":1}'` is not suddenly a different command.
@@ -612,7 +617,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
                 // The schema is fetched first so the prompts match what this processor actually
                 // accepts. Signed, so the publisher's own unlisted processors work too.
                 const d = await api<{ manifest?: Manifest; input_schema?: JsonSchema }>(
-                    BASE, 'GET', `/processors/${slug}`, { kp },
+                    BASE, 'GET', `/processors/${slug}`, { ...creds },
                 );
                 input = await promptForSchema(d.manifest?.input_schema ?? d.input_schema);
                 ok(`input: ${JSON.stringify(input)}`);
@@ -620,7 +625,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             // `--get` invokes over GET, for a processor that declares methods: ["GET"] — which was
             // otherwise un-runnable from this CLI at all, since every invoke went out as a POST.
             const res = await invokeAndWait(
-                BASE, slug, input, kp, token, flags.json === true, flags.get === true,
+                BASE, slug, input, creds, token, flags.json === true, flags.get === true,
             );
             reportRun(res, flags);
             break;
@@ -630,12 +635,15 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             const slug = words[1] || requireSlug(flags);
             // Signed when a keypair is available, so an owner can read their own unlisted
             // processor's schema; unsigned still works for anything listed.
-            let kp: Keypair | undefined;
-            try { kp = loadKeypair(flags); } catch { kp = undefined; }
+            let creds: Creds | undefined;
+            // Best effort: schema works on any PUBLIC slug with no credential at all, so a machine
+            // with neither a keypair nor a key must still be able to read one. loadCreds calls
+            // die() rather than throwing, so guard on what we have instead of catching.
+            creds = hasAnyCredential(flags) ? loadCreds(flags) : undefined;
             const d = await api<{
                 manifest?: Manifest; input_schema?: JsonSchema; output_schema?: JsonSchema;
                 name?: string; description?: string; price_usd?: string; price_micro?: number;
-            }>(BASE, 'GET', `/processors/${slug}`, kp ? { kp } : {});
+            }>(BASE, 'GET', `/processors/${slug}`, creds ? { ...creds } : {});
 
             const input = d.manifest?.input_schema ?? d.input_schema;
             const output = d.manifest?.output_schema ?? d.output_schema;
@@ -655,7 +663,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'secrets': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const slug = requireSlug(flags);
             const pairs = words.slice(1);
             if (!pairs.length) die('usage: singularity processors secrets KEY=value [KEY2=value2]   (KEY= clears)');
@@ -668,7 +676,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
                 values[pair.slice(0, eq)] = v === '' ? null : v;
             }
             const res = await api<{ secrets: string[] }>(
-                BASE, 'PUT', `/processors/${slug}/secrets`, { body: { values }, kp },
+                BASE, 'PUT', `/processors/${slug}/secrets`, { body: { values }, ...creds },
             );
             if (emit(flags, res)) break;
             ok(`secrets set: ${res.secrets.join(', ') || '(none)'}`);
@@ -681,7 +689,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'env': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const slug = requireSlug(flags);
             const action = words[1] || 'list';
 
@@ -694,7 +702,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
                     manifest?: Manifest;
                     secret_keys?: string[];
                     secret_modes?: Record<string, string>;
-                }>(BASE, 'GET', `/processors/${slug}`, { kp });
+                }>(BASE, 'GET', `/processors/${slug}`, { ...creds });
                 const declared = d.manifest?.secrets ?? [];
                 const set = new Set(d.secret_keys ?? []);
                 const modes = d.secret_modes ?? {};
@@ -723,7 +731,7 @@ export async function run(words: string[], flags: Flags): Promise<void> {
                 const key = words[2];
                 if (!key) die('usage: singularity processors env unset KEY');
                 const res = await api<{ secrets: string[] }>(
-                    BASE, 'PUT', `/processors/${slug}/secrets`, { body: { values: { [key]: null } }, kp },
+                    BASE, 'PUT', `/processors/${slug}/secrets`, { body: { values: { [key]: null } }, ...creds },
                 );
                 if (emit(flags, res)) break;
                 ok(`cleared ${key}`);
@@ -736,8 +744,8 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'list': {
-            const kp = loadKeypair(flags);
-            const res = await api<{ processors: ProcessorRow[] }>(BASE, 'GET', '/processors', { kp });
+            const creds = loadCreds(flags);
+            const res = await api<{ processors: ProcessorRow[] }>(BASE, 'GET', '/processors', { ...creds });
             if (emit(flags, res)) break;
             if (!res.processors.length) { ok('no processors yet — singularity processors init'); break; }
             for (const p of res.processors) {
@@ -784,18 +792,18 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'logs': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const slug = words[1] || requireSlug(flags);
             const limit = Number(flags.limit || 30);
 
             if (flags.follow === true) {
-                await followLogs(BASE, slug, kp, limit);
+                await followLogs(BASE, slug, creds, limit);
                 break;
             }
 
             const res = await api<RunsPage>(
                 BASE, 'GET', `/processors/${slug}/runs`,
-                { kp, query: { limit, ...(typeof flags.logs === 'string' ? { logs: flags.logs } : {}) } },
+                { ...creds, query: { limit, ...(typeof flags.logs === 'string' ? { logs: flags.logs } : {}) } },
             );
             if (emit(flags, res)) break;
             printRunsPage(res);
@@ -816,8 +824,8 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             // obvious implementation — call /earnings once per processor — would prompt N times to
             // print one table. The list route already carries both money views folded in, so this is
             // a client-side roll-up of a single request.
-            const kp = loadKeypair(flags);
-            const res = await api<{ processors: ProcessorRow[]; owner: string }>(BASE, 'GET', '/processors', { kp });
+            const creds = loadCreds(flags);
+            const res = await api<{ processors: ProcessorRow[]; owner: string }>(BASE, 'GET', '/processors', { ...creds });
 
             let sales = 0n, salesCount = 0n, spent = 0n, held = 0n;
             for (const p of res.processors) {
@@ -850,9 +858,9 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'earnings': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const slug = words[1] || requireSlug(flags);
-            const res = await api<EarningsRes>(BASE, 'GET', `/processors/${slug}/earnings`, { kp });
+            const res = await api<EarningsRes>(BASE, 'GET', `/processors/${slug}/earnings`, { ...creds });
             if (emit(flags, res)) break;
 
             const byChain = res.sales.paid_to_by_chain;
@@ -881,11 +889,11 @@ export async function run(words: string[], flags: Flags): Promise<void> {
 
         case 'pause':
         case 'resume': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const slug = requireSlug(flags);
             const paused = sub === 'pause';
             const res = await api<{ paused: boolean; paused_at: string | null; note?: string }>(
-                BASE, 'PUT', `/processors/${slug}/pause`, { body: { paused }, kp },
+                BASE, 'PUT', `/processors/${slug}/pause`, { body: { paused }, ...creds },
             );
             if (emit(flags, res)) break;
             ok(`${slug}: ${res.paused ? 'paused' : 'running'}`);
@@ -895,11 +903,11 @@ export async function run(words: string[], flags: Flags): Promise<void> {
 
         case 'publish':
         case 'unpublish': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const slug = requireSlug(flags);
             const listed = sub === 'publish';
             const res = await api<{ note?: string }>(
-                BASE, 'PUT', `/processors/${slug}/listing`, { body: { listed }, kp },
+                BASE, 'PUT', `/processors/${slug}/listing`, { body: { listed }, ...creds },
             );
             if (emit(flags, res)) break;
             ok(res.note || (listed ? 'published' : 'unpublished'));
@@ -907,10 +915,10 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'rotate': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const slug = requireSlug(flags);
             const res = await api<{ invoke_token: string }>(
-                BASE, 'POST', `/processors/${slug}/rotate-token`, { kp },
+                BASE, 'POST', `/processors/${slug}/rotate-token`, { ...creds },
             );
             writeState({ slug, invoke_token: res.invoke_token });
             if (emit(flags, res)) break;
@@ -921,14 +929,14 @@ export async function run(words: string[], flags: Flags): Promise<void> {
         }
 
         case 'delete': {
-            const kp = loadKeypair(flags);
+            const creds = loadCreds(flags);
             const slug = requireSlug(flags);
             if (!flags.yes) {
                 die(`this cannot be undone and the slug "${slug}" can NEVER be reused.\n`
                     + '  to stop traffic without losing the slug:  singularity processors pause\n'
                     + '  to really delete it, re-run with --yes');
             }
-            await api(BASE, 'DELETE', `/processors/${slug}`, { kp });
+            await api(BASE, 'DELETE', `/processors/${slug}`, { ...creds });
             ok(`deleted ${slug} (the slug stays reserved)`);
             break;
         }
@@ -1010,12 +1018,12 @@ function printRunsPage(res: RunsPage): void {
  * created_at" filter drops a run that started earlier and finished later — exactly the slow run
  * someone tailing logs is watching for.
  */
-async function followLogs(base: string, slug: string, kp: Keypair, limit: number): Promise<void> {
+async function followLogs(base: string, slug: string, creds: Creds, limit: number): Promise<void> {
     const seen = new Set<string>();
     let first = true;
     ok(`following ${slug} — ctrl-c to stop`);
     for (;;) {
-        const res = await api<RunsPage>(base, 'GET', `/processors/${slug}/runs`, { kp, query: { limit } });
+        const res = await api<RunsPage>(base, 'GET', `/processors/${slug}/runs`, { ...creds, query: { limit } });
 
         // Oldest first, so the terminal reads top-to-bottom like a log file.
         for (const r of [...res.runs].reverse()) {

@@ -8,11 +8,11 @@
  * version that looks right in a terminal.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseArgs, bs58, prompt } from './auth.js';
+import { parseArgs, bs58, prompt, loadCreds } from './auth.js';
 import { usd, coerce } from './format.js';
 import { bundleProcessor } from './bundle.js';
 import { checkPayoutAddress } from './processors.js';
@@ -342,5 +342,88 @@ describe('payout address checks', () => {
     it('accepts an all-lowercase EVM address, which carries no checksum to fail', () => {
         // EIP-55 is enforced server-side; the CLI has no keccak256 and says so rather than pretending.
         expect(checkPayoutAddress('base', '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913')).toBeNull();
+    });
+});
+
+// ─── Credential resolution ─────────────────────────────────────────────────
+//
+// The CLI signed with a keypair and nothing else until 0.3.0. These pin the precedence, because
+// the failure mode of getting it wrong is silent: a CI job with SGL_API_KEY set would sign with
+// whatever keypair happened to be on the runner and act as the wrong wallet.
+
+/** die() writes to stderr then process.exit(1); vitest turns the exit into a throw. Capture what
+ *  it actually said, so an assertion cannot pass on the wrong failure. */
+function capture(fn: () => unknown): string {
+    const orig = console.error;
+    let out = '';
+    console.error = (...a: unknown[]) => { out += a.join(' ') + '\n'; };
+    try { fn(); } catch { /* the intercepted exit */ } finally { console.error = orig; }
+    return out;
+}
+
+describe('loadCreds', () => {
+    const saved = { key: process.env.SGL_API_KEY, alt: process.env.SINGULARITY_API_KEY };
+    afterEach(() => {
+        if (saved.key === undefined) delete process.env.SGL_API_KEY; else process.env.SGL_API_KEY = saved.key;
+        if (saved.alt === undefined) delete process.env.SINGULARITY_API_KEY; else process.env.SINGULARITY_API_KEY = saved.alt;
+    });
+
+    it('prefers --api-key over the environment', () => {
+        process.env.SGL_API_KEY = 'x402c_from_env';
+        const c = loadCreds({ 'api-key': 'x402c_from_flag' });
+        expect(c.apiKey).toBe('x402c_from_flag');
+        expect(c.kp).toBeUndefined();
+    });
+
+    it('reads SGL_API_KEY when no flag is given', () => {
+        process.env.SGL_API_KEY = 'x402c_env';
+        expect(loadCreds({}).apiKey).toBe('x402c_env');
+    });
+
+    it('accepts SINGULARITY_API_KEY as an alias', () => {
+        delete process.env.SGL_API_KEY;
+        process.env.SINGULARITY_API_KEY = 'x402c_alias';
+        expect(loadCreds({}).apiKey).toBe('x402c_alias');
+    });
+
+    it('NEVER returns both: a key means the keypair is not even loaded', () => {
+        // The point of the precedence. If both came back, api() would send both headers and the
+        // question "which credential authorised this" would have no answer in a log.
+        process.env.SGL_API_KEY = 'x402c_env';
+        const c = loadCreds({ keypair: '/definitely/not/a/real/path.json' });
+        expect(c.apiKey).toBe('x402c_env');
+        expect(c.kp).toBeUndefined();
+    });
+
+    it('ignores a whitespace-only ENV key and falls through to the keypair', () => {
+        // Asserts on the MESSAGE, not merely that something threw. die() calls process.exit, which
+        // vitest turns into a throw, so a bare toThrow() could not tell "fell through to the
+        // keypair" from "rejected the blank key" — it passed either way.
+        process.env.SGL_API_KEY = '   ';
+        const err = capture(() => loadCreds({ keypair: '/definitely/not/a/real/path.json' }));
+        expect(err).toContain('no keypair at /definitely/not/a/real/path.json');
+    });
+
+    it('DIES on --api-key with no value rather than signing as some other wallet', () => {
+        process.env.SGL_API_KEY = 'x402c_env';
+        // parseArgs gives `true` when nothing follows the flag. Falling back to the env key, or
+        // worse to the keypair, would act as a wallet the user did not ask for.
+        expect(capture(() => loadCreds({ 'api-key': true }))).toContain('--api-key needs a value');
+    });
+
+    it('DIES on the --api-key=VALUE form instead of ignoring it', () => {
+        delete process.env.SGL_API_KEY;
+        expect(capture(() => loadCreds({ 'api-key=x402c_abc': true }))).toContain('--api-key=VALUE is not supported');
+    });
+
+    it('prefers SGL_API_KEY over SINGULARITY_API_KEY when both are set', () => {
+        process.env.SGL_API_KEY = 'x402c_primary';
+        process.env.SINGULARITY_API_KEY = 'x402c_alias';
+        expect(loadCreds({}).apiKey).toBe('x402c_primary');
+    });
+
+    it('trims the flag value', () => {
+        delete process.env.SGL_API_KEY;
+        expect(loadCreds({ 'api-key': '  x402c_padded  ' }).apiKey).toBe('x402c_padded');
     });
 });

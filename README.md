@@ -7,8 +7,8 @@ npm i -g @singularity-layer/cli
 singularity --help
 ```
 
-Requires Node 20+ and a Solana keypair (`solana-keygen new`). No account, no API key, no dashboard
-login — your wallet *is* the account.
+Requires Node 20+ and either a Solana keypair (`solana-keygen new`) or a compute API key. No
+account and no dashboard login — your wallet *is* the account.
 
 ## Processors
 
@@ -152,10 +152,35 @@ singularity processors run '{"n":1}' --json
 
 ## Auth
 
-A per-request Solana wallet signature, using `~/.config/solana/id.json` by default (`--keypair
-<path>`, `SINGULARITY_KEYPAIR`, or `singularity processors configure` to change it). **The key never
-leaves your machine** — only a signature is sent, and it covers the method, the path and a hash of the
+Two ways in. The CLI picks the API key when one is given, and the keypair otherwise.
+
+**Wallet signature (default).** Uses `~/.config/solana/id.json` (`--keypair <path>`,
+`SINGULARITY_KEYPAIR`, or `singularity processors configure` to change it). **The key never leaves
+your machine** — only a signature is sent, and it covers the method, the path and a hash of the
 body, so it authorizes exactly one request and cannot be replayed against another.
+
+**Compute API key.** `--api-key x402c_...`, or `SGL_API_KEY` in the environment. This is the option
+for CI and for agents, where there is no keypair to hold.
+
+```bash
+export SGL_API_KEY=x402c_...
+singularity whoami                  # the wallet the key resolves to
+singularity processors list
+singularity processors deploy
+```
+
+Mint the key in the dashboard with the `processors:write` scope, or `processors:read` if you only
+need the read commands. Two things to know before you rely on it:
+
+- **`processors:write` is full control** of that wallet's processors, delete and secrets included.
+  A bearer credential cannot be bound to one request the way a signature is, so scope is the only
+  control. Mint `processors:read` if you want something that cannot change anything.
+- **`deploy` needs a key minted on a Solana wallet.** That address becomes your payout account, so
+  a key on an EVM wallet gets `400 solana_wallet_required`. It can still manage processors its
+  wallet already owns.
+
+An API key never expires, and there is no audit log of what it did. Revoking it in the dashboard is
+the only way to stop it.
 
 ## Programmatic use
 

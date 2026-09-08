@@ -84,7 +84,14 @@ export function loadKeypair(flags: Flags = {}): Keypair {
         || join(homedir(), '.config/solana/id.json'),
     );
     if (!existsSync(path)) {
-        die(`no keypair at ${path}\n  pass --keypair <path>, set SINGULARITY_KEYPAIR, or create one:\n  solana-keygen new`);
+        die(
+            `no credential found\n`
+            + `  no keypair at ${path}\n`
+            + `  pass --keypair <path>, or set SINGULARITY_KEYPAIR, or create one:\n`
+            + `    solana-keygen new\n`
+            + `  or authenticate with a compute API key instead:\n`
+            + `    --api-key x402c_...   (also read from SGL_API_KEY)`,
+        );
     }
     let raw: unknown;
     try { raw = JSON.parse(readFileSync(path, 'utf8')); } catch { die(`${path} is not a valid keypair file`); }
@@ -99,6 +106,59 @@ export function loadKeypair(flags: Flags = {}): Keypair {
     return { secretKey: pair.secretKey, address: bs58(pair.publicKey) };
 }
 
+/** Either credential the control plane accepts. Exactly one is ever set. */
+export interface Creds { kp?: Keypair; apiKey?: string }
+
+/**
+ * Resolve how this invocation authenticates.
+ *
+ * An API KEY WINS when one is given, because asking for it is explicit: `--api-key` on the command
+ * line, or SGL_API_KEY in the environment. Falling back to the keypair when a key is present would
+ * mean a CI job with SGL_API_KEY set silently signed with whatever keypair happened to be on the
+ * runner, which is the opposite of what was asked for.
+ *
+ * Otherwise it is the keypair, exactly as before, so nothing about the existing workflow changes.
+ */
+/**
+ * Is there a credential to load at all? For commands that work unauthenticated on public data and
+ * should not die just because this machine has no keypair.
+ */
+export function hasAnyCredential(flags: Flags = {}): boolean {
+    if ('api-key' in flags) return true;
+    if ((process.env.SGL_API_KEY || process.env.SINGULARITY_API_KEY || '').trim()) return true;
+    const path = String(
+        flags.keypair || process.env.SINGULARITY_KEYPAIR || process.env.SGLPROC_KEYPAIR
+        || join(homedir(), '.config/solana/id.json'),
+    );
+    return existsSync(path);
+}
+
+export function loadCreds(flags: Flags = {}): Creds {
+    // ASKING FOR KEY AUTH AND NOT GETTING IT IS THE WORST OUTCOME HERE, so an explicit --api-key
+    // that carries no usable value is fatal rather than a fallback.
+    //
+    // parseArgs gives `true` for a flag with nothing after it, and `--api-key=x402c_…` arrives as a
+    // flag literally NAMED "api-key=x402c_…". Both used to fall through to the keypair, so someone
+    // who typed --api-key would silently be signed as whatever wallet happened to be in
+    // ~/.config/solana/id.json — acting as the wrong account, which is exactly what this flag
+    // exists to avoid.
+    if ('api-key' in flags && typeof flags['api-key'] !== 'string') {
+        die('--api-key needs a value:\n  --api-key x402c_...\n  or set SGL_API_KEY, which keeps it out of your shell history');
+    }
+    const equalsForm = Object.keys(flags).find((k) => k.startsWith('api-key='));
+    if (equalsForm) {
+        die(`--api-key=VALUE is not supported; use a space:\n  --api-key ${equalsForm.slice('api-key='.length) || 'x402c_...'}`);
+    }
+
+    const flagKey = typeof flags['api-key'] === 'string' ? String(flags['api-key']).trim() : '';
+    if ('api-key' in flags && !flagKey) die('--api-key was given an empty value');
+    if (flagKey) return { apiKey: flagKey };
+
+    const envKey = (process.env.SGL_API_KEY || process.env.SINGULARITY_API_KEY || '').trim();
+    if (envKey) return { apiKey: envKey };
+    return { kp: loadKeypair(flags) };
+}
+
 async function sha256Hex(input: string): Promise<string> {
     const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
     return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -107,6 +167,15 @@ async function sha256Hex(input: string): Promise<string> {
 export interface ApiOpts {
     body?: unknown;
     kp?: Keypair;
+    /**
+     * Compute API key (`x402c_…`), sent as `X-API-Key`.
+     *
+     * MUTUALLY EXCLUSIVE WITH `kp` in practice: loadCreds returns one or the other, never both.
+     * The server accepts either, and presenting both would just mean the key decides, but keeping
+     * them exclusive at the source means there is never a question about which one authorised an
+     * action when reading a log.
+     */
+    apiKey?: string;
     bearer?: string;
     /**
      * Query parameters. An ARRAY value becomes REPEATED keys (`?tag=a&tag=b`), which is exactly what
@@ -155,7 +224,7 @@ export async function api<T = unknown>(
     base: string,
     method: NonNullable<ApiOpts['method']>,
     path: string,
-    { body, kp, bearer, query, signQuery }: ApiOpts = {},
+    { body, kp, apiKey, bearer, query, signQuery }: ApiOpts = {},
 ): Promise<T> {
     let qs = '';
     if (query) {
@@ -177,6 +246,16 @@ export async function api<T = unknown>(
     const headers: Record<string, string> = {};
     if (sentRaw) headers['content-type'] = 'application/json';
     if (bearer) headers.Authorization = `Bearer ${bearer}`;
+
+    // ENFORCED HERE, not just in loadCreds. `api` and `ApiOpts` are exported from index.ts, so a
+    // programmatic caller can hand over both; the server would let the key decide and silently
+    // ignore the signature, leaving "which credential authorised this" unanswerable from a log.
+    if (kp && apiKey) die('pass either a keypair or an apiKey to api(), never both');
+
+    // A key needs no timestamp, nonce or body hash: it is not bound to the request. That is the
+    // trade. It reaches every control-plane route the signature does, EXCEPT `suspend`,
+    // `auth-session`, and the owner lane of `run` — see the note on run() in processors.ts.
+    if (apiKey) headers['X-API-Key'] = apiKey;
 
     if (kp) {
         const timestamp = String(Math.floor(Date.now() / 1000));

@@ -11,10 +11,10 @@
  *   • `sglcode` — the agentic coding CLI. A product in its own right, like Claude Code.
  *                 Demoting it to `singularity code` would misrepresent what it is.
  *
- * Auth is a per-request Solana wallet signature. The key never leaves the machine.
+ * Auth is a per-request Solana wallet signature, or a compute API key. The key never leaves the machine.
  */
 
-import { parseArgs, loadKeypair, ok, type Flags } from './auth.js';
+import { parseArgs, loadCreds, api, ok, die, type Flags } from './auth.js';
 import * as processors from './processors.js';
 import { VERSION } from './version.js';
 
@@ -28,10 +28,16 @@ usage: singularity <command> [subcommand] [options]
 
 commands:
 ${Object.entries(COMMANDS).map(([k, v]) => `  ${k.padEnd(14)} ${v.blurb}`).join('\n')}
-  whoami         print the wallet address your keypair resolves to
+  whoami         print the wallet address this credential resolves to
 
   singularity <command>            show that command's subcommands
   --keypair <path>                 defaults to ~/.config/solana/id.json
+  SGL_API_KEY=x402c_...            authenticate with a compute API key instead of a keypair.
+                                   Prefer the env var: --api-key <key> works too, but argv is
+                                   visible in ps and your shell history. Needs processors:write
+                                   (processors:read for read-only commands). Cannot deploy unless
+                                   the key's wallet is a Solana one, since that address becomes
+                                   your payout account, and 'run' uses the invoke-token lane.
   --json                           machine-readable output, for scripts and agents
 
 Other Singularity CLIs, deliberately separate:
@@ -49,8 +55,23 @@ async function main(): Promise<void> {
     if (!cmd || flags.help || cmd === 'help') { ok(HELP); process.exit(cmd && cmd !== 'help' ? 1 : 0); }
 
     if (cmd === 'whoami') {
-        const kp = loadKeypair(flags);
-        ok(flags.json ? JSON.stringify({ address: kp.address, chain: 'solana' }) : kp.address);
+        // With a key there is no local address to print: the wallet lives on the key's row in the
+        // database, so the server is the only thing that knows it. `GET /processors` returns it as
+        // `owner`, which is one request and needs no extra route.
+        const creds = loadCreds(flags);
+        if (creds.apiKey) {
+            const res = await api<{ owner?: string }>(processors.resolveBase(flags), 'GET', '/processors', { ...creds });
+            const owner = res.owner || '';
+            if (!owner) die('the API key is valid but returned no owner wallet');
+            // NOT hardcoded solana. A compute key can be minted on an EVM wallet, and the server
+            // returns whatever that row holds; it hardcodes chain 'solana' in its own result with a
+            // comment calling it "a label and not a fact". Derive it from the address instead.
+            const chain = owner.startsWith('0x') ? 'evm' : 'solana';
+            ok(flags.json ? JSON.stringify({ address: owner, chain, via: 'api-key' }) : owner);
+            return;
+        }
+        const kp = creds.kp!;
+        ok(flags.json ? JSON.stringify({ address: kp.address, chain: 'solana', via: 'keypair' }) : kp.address);
         return;
     }
 
