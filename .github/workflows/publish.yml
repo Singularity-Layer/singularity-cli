@@ -29,15 +29,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NO `registry-url`. It looks harmless, but it makes setup-node write an .npmrc containing
+      # `_authToken=${NODE_AUTH_TOKEN}` and then sets NODE_AUTH_TOKEN to a literal placeholder.
+      # npm then authenticates with that placeholder, gets refused, and never attempts trusted
+      # publishing at all — surfacing as `404 Not Found - PUT`, which reads like the package does
+      # not exist. Cost two failed releases to spot.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
 
-      # Node 22 ships npm 10, which predates Trusted Publishing. Without this the job falls back to
-      # looking for a token, finds none, and fails exactly the way the expired secret did.
+      # Node 22 ships npm 10, which predates Trusted Publishing. Without this the job looks for a
+      # token, finds none, and fails the same way.
       - name: Use an npm that understands trusted publishing
-        run: npm install -g npm@latest
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Install
         run: npm ci
