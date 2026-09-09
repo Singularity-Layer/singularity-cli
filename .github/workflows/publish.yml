@@ -2,9 +2,14 @@ name: Publish to npm
 
 # Publishes @singularity-layer/cli when a GitHub Release tagged v* is published.
 #
-# Requires repo secret NPM_TOKEN — an npm automation token with publish rights on the
-# @singularity-layer scope. Tag the release to match package.json "version" (e.g. v0.2.1); the job
-# REFUSES to publish if they disagree, because an npm version is immutable once published.
+# NO TOKEN. Publishing is authorised by npm Trusted Publishing: npm is configured to trust this
+# repo and this workflow file, and the job proves who it is with the same short-lived OIDC identity
+# it already used for provenance. There is nothing to rotate and nothing to leak, which is why the
+# NPM_TOKEN secret is gone — it had expired, and the failure it produced was a bare 404 that looks
+# like the package does not exist rather than like a dead credential.
+#
+# Tag the release to match package.json "version" (e.g. v0.2.1); the job REFUSES to publish if they
+# disagree, because an npm version is immutable once published.
 
 on:
   release:
@@ -28,6 +33,11 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+
+      # Node 22 ships npm 10, which predates Trusted Publishing. Without this the job falls back to
+      # looking for a token, finds none, and fails exactly the way the expired secret did.
+      - name: Use an npm that understands trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install
         run: npm ci
@@ -79,6 +89,5 @@ jobs:
           node -e "import('./dist/index.js').then(m => { if (!m.bundleProcessor || !m.usd) throw new Error('library entry is broken'); })"
 
       - name: Publish
+        # No NODE_AUTH_TOKEN. `id-token: write` above is the whole credential.
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
