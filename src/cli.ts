@@ -35,9 +35,13 @@ ${Object.entries(COMMANDS).map(([k, v]) => `  ${k.padEnd(14)} ${v.blurb}`).join(
   SGL_API_KEY=x402c_...            authenticate with a compute API key instead of a keypair.
                                    Prefer the env var: --api-key <key> works too, but argv is
                                    visible in ps and your shell history. Needs processors:write
-                                   (processors:read for read-only commands). Cannot deploy unless
-                                   the key's wallet is a Solana one, since that address becomes
-                                   your payout account, and 'run' uses the invoke-token lane.
+                                   (processors:read for read-only commands). A key from a Solana
+                                   wallet deploys as that wallet. A key from a Google/GitHub/X login
+                                   (an ACCOUNT key) deploys processors owned by the account: the
+                                   manifest must set "payout": { "solana": "<a Solana wallet linked to
+                                   your account>" }, and that payout cannot be changed afterwards.
+                                   Account keys cannot change a linked wallet's processors (that
+                                   needs the wallet). 'run' uses the invoke-token lane.
   --json                           machine-readable output, for scripts and agents
 
 Other Singularity CLIs, deliberately separate:
@@ -66,7 +70,8 @@ async function main(): Promise<void> {
             // NOT hardcoded solana. A compute key can be minted on an EVM wallet, and the server
             // returns whatever that row holds; it hardcodes chain 'solana' in its own result with a
             // comment calling it "a label and not a fact". Derive it from the address instead.
-            const chain = owner.startsWith('0x') ? 'evm' : 'solana';
+            // An ACCOUNT key (Google/GitHub/X login) resolves to the account principal, not a wallet.
+            const chain = owner.startsWith('acct:') ? 'account' : owner.startsWith('0x') ? 'evm' : 'solana';
             ok(flags.json ? JSON.stringify({ address: owner, chain, via: 'api-key' }) : owner);
             return;
         }
