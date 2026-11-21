@@ -14,7 +14,8 @@ account and no dashboard login — your wallet *is* the account.
 
 A Processor is a loop you write; we host it, run it on demand, and buyers pay **you** directly per
 call. There is no platform cut and we never custody your money: an x402 payment is a USDC transfer
-from the buyer's wallet to yours.
+from the buyer's wallet to yours. Buyers pay with the x402 `X-Payment` header (v1) or, where the 402
+also carries a `PAYMENT-REQUIRED` header, `PAYMENT-SIGNATURE` (v2); it is the same transfer either way.
 
 ```bash
 mkdir my-loop && cd my-loop

@@ -86,6 +86,8 @@ to processor.json:
   }
 
 One price_usd covers all three (every asset is 6-decimal), and buyers pick a chain from the 402.
+Buyers pay with x402: X-Payment (v1) or, when the 402 also carries a PAYMENT-REQUIRED header,
+PAYMENT-SIGNATURE (v2). The signed payment is the same USDC transfer either way.
 Name only the chains you want: a chain you leave out is never offered. Check each address twice —
 a payment cannot be reversed.`;
 
@@ -601,7 +603,8 @@ export async function run(words: string[], flags: Flags): Promise<void> {
 
             // Two ways in. An AUTHOR signs with their wallet plus the invoke token — owners run
             // their own processors, including unlisted and PAUSED ones (a non-owner gets 404 or
-            // 503). A BUYER pays per call with x402 (X-Payment); there is no API-key lane, because
+            // 503). A BUYER pays per call with x402 (v1 X-Payment, or v2 PAYMENT-SIGNATURE when the
+            // 402 carries PAYMENT-REQUIRED); there is no API-key lane, because
             // buyer payments go straight to the publisher's wallet and never through us.
             const token = String(flags.token || readState().invoke_token || '');
             if (!token) die(`no invoke token in ${STATE_FILE} — run \`singularity processors rotate\``);
