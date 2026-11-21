@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import nacl from 'tweetnacl';
 import { parseArgs, bs58 } from './auth.js';
 import {
-    computeAuthHeaders, parseApiError, pickSandbox, splitRef, makeEscapeFilter, closeMessage, checkUpload, explain, ApiError, MAX_PUT_BYTES,
+    computeAuthHeaders, computeBase, parseApiError, pickSandbox, splitRef, makeEscapeFilter, closeMessage, checkUpload, explain, ApiError, MAX_PUT_BYTES,
 } from './sandbox.js';
 
 describe('parseArgs: a bare -- ends the options', () => {
@@ -130,5 +130,16 @@ describe('put takes text files only', () => {
         expect(checkUpload(Buffer.from([0x68, 0x00, 0x69]))).toMatch(/binary/);
         expect(checkUpload(Buffer.from([0xff, 0xfe, 0x41]))).toMatch(/UTF-8/);
         expect(checkUpload(Buffer.alloc(MAX_PUT_BYTES + 1, 0x61))).toMatch(/KB/);
+    });
+});
+
+describe('compute URL override', () => {
+    it('https or localhost only, since the key goes there', () => {
+        expect(computeBase({ 'compute-url': 'https://staging.example.com/' })).toBe('https://staging.example.com');
+        expect(computeBase({ 'compute-url': 'http://localhost:8787' })).toBe('http://localhost:8787');
+        const exit = process.exit;
+        (process as any).exit = (c: number) => { throw new Error('exit ' + c); };
+        try { expect(() => computeBase({ 'compute-url': 'http://evil.example.com' })).toThrow('exit 1'); }
+        finally { process.exit = exit; }
     });
 });

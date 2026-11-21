@@ -60,6 +60,11 @@ model "agent-pod". Each request is one turn of the sandbox's coding agent.`;
 export function computeBase(flags: Flags): string {
     const override = (typeof flags['compute-url'] === 'string' && flags['compute-url']) || process.env.SINGULARITY_COMPUTE_URL;
     if (override) {
+        // Your key (or a replayable signature) goes to this host: https only, except your own machine.
+        let u: URL;
+        try { u = new URL(String(override)); } catch { return die(`--compute-url is not a URL: ${override}`); }
+        const local = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+        if (u.protocol !== 'https:' && !(local && u.protocol === 'http:')) die('--compute-url must be https (http only for localhost)');
         process.stderr.write(`(using ${override})\n`);
         return String(override).replace(/\/+$/, '');
     }
@@ -317,8 +322,9 @@ async function connect(ctx: Ctx, id: string): Promise<void> {
     });
     // Ctrl-C reaches the remote shell as a byte in raw mode. These only fire for signals from outside.
     const bye = () => { try { ws.close(1000); } catch { /* closed */ } };
-    process.once('SIGTERM', bye);
-    process.once('SIGHUP', bye);
+    // Signals from outside (Ctrl-C typed here is a byte in raw mode, not a signal): close cleanly,
+    // which restores the terminal before exiting.
+    for (const sig of ['SIGTERM', 'SIGHUP', 'SIGINT', 'SIGQUIT'] as const) process.once(sig, bye);
     await done;
 }
 
