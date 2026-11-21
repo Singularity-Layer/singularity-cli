@@ -7,7 +7,7 @@ npm i -g @singularity-layer/cli
 singularity --help
 ```
 
-Requires Node 20+ and either a Solana keypair (`solana-keygen new`) or a compute API key. No
+Requires Node 20+ (22+ for `sandbox connect`) and either a Solana keypair (`solana-keygen new`) or a compute API key. No
 account and no dashboard login — your wallet *is* the account.
 
 ## Processors
@@ -103,6 +103,37 @@ value an SDK insists on reading itself. The alternative most people reach for ot
 hard-coding the secret in their source, which is worse in every way.
 
 `singularity processors env list` shows which of yours is which.
+
+## Coding sandbox
+
+Use your Coding sandbox (Claude Code, Codex, OpenCode or Pi on its own private computer) from your
+own terminal. It is the same secure path the browser terminal uses: a single-use, 60-second ticket
+and a WebSocket relayed through the sandbox's own outbound connection. No SSH, no open port.
+
+```bash
+export SGL_API_KEY=x402c_...              # see Permissions below
+singularity sandbox list
+singularity sandbox connect               # a full shell, here. Type ~. on a new line to leave
+singularity sandbox exec -- npm test      # one command; exits with its exit code
+singularity sandbox files                 # list the workspace
+singularity sandbox get src/app.ts        # print a file (or: get src/app.ts ./app.ts)
+singularity sandbox put ./notes.md        # upload a text file (up to 100 KB)
+singularity sandbox key                   # an OpenAI-compatible key for the sandbox's agent
+```
+
+A sleeping sandbox wakes by itself when you connect or run something. `connect` needs Node 22 or
+newer (it uses the built-in WebSocket). With more than one sandbox, name it: its id, the first few
+characters of the id, or its name (`singularity sandbox connect 99a7`).
+
+**OpenAI-compatible address.** `singularity sandbox key` prints a key and a base URL like
+`https://compute.x402layer.cc/pods/<id>/v1`. Point any OpenAI client at it with model `agent-pod`;
+each request is one turn of the sandbox's coding agent (streaming works). The agent can run commands
+on the sandbox, so treat the key like a password. `keys` lists them, `revoke-key` turns one off.
+
+Permissions: the terminal, exec, files and keys all need a compute API key (Settings > API keys)
+with the Agent Pods permission "Read and write pod files, install skills, create and restore
+backups" (`pods:control:write`), or a keypair. Keys from a Google, GitHub or X login can use `connect`, `key`
+and `keys`; `exec`, `files`, `get` and `put` need a key from a wallet login.
 
 ## Processor state
 

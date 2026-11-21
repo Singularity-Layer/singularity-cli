@@ -315,6 +315,14 @@ export function parseArgs(argv: string[]): { words: string[]; flags: Flags } {
     for (let i = 0; i < argv.length; i++) {
         const tok = argv[i] as string;
 
+        // A bare `--` ends the options: everything after it is a word, verbatim (`sandbox exec -- ls -la`).
+        // Where it fell is recorded, so a command can tell its own arguments from the passthrough.
+        if (tok === '--') {
+            flags['--'] = String(words.length);
+            for (const rest of argv.slice(i + 1)) words.push(rest);
+            break;
+        }
+
         if (tok.startsWith('--')) {
             const name = tok.slice(2);
             const next = argv[i + 1];
