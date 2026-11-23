@@ -17,7 +17,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, realpathSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { spawnSync, spawn } from 'node:child_process';
 import { die, ok, type Flags, type Creds } from './auth.js';
@@ -89,9 +89,29 @@ export interface BlockOpts {
     extra?: string[];
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function assertSandboxId(id: string): string {
+    if (!UUID_RE.test(id)) die(`not a sandbox id: ${JSON.stringify(id).slice(0, 60)}`);
+    return id;
+}
+
+/**
+ * One word of the ProxyCommand. ssh hands that line to your shell on macOS and Linux, so it is
+ * single-quoted there ($ and backticks stay literal); Windows runs it without a shell, which
+ * takes double quotes. Control characters are dropped either way.
+ */
+export function proxyWord(p: string, platform: NodeJS.Platform = process.platform): string {
+    // eslint-disable-next-line no-control-regex
+    const clean = p.replace(/[\u0000-\u001f\u007f]/g, '').replace(/%/g, '%%');
+    if (platform === 'win32') return '"' + clean.replace(/\\/g, '/').replace(/"/g, '') + '"';
+    return "'" + clean.replace(/'/g, `'\\''`) + "'";
+}
+
 /** The ProxyCommand line (absolute node + CLI paths: an editor started from the dock has no PATH). */
-export function proxyCommand(o: Pick<BlockOpts, 'id' | 'nodePath' | 'cliPath' | 'home' | 'extra'>): string {
-    return [sshPath(o.nodePath), sshPath(o.cliPath), 'sandbox', 'ssh-proxy', o.id, '--public-key', sshPath(keyPath(o.home) + '.pub'), ...(o.extra || [])].join(' ');
+export function proxyCommand(o: Pick<BlockOpts, 'id' | 'nodePath' | 'cliPath' | 'home' | 'extra'>, platform: NodeJS.Platform = process.platform): string {
+    assertSandboxId(o.id);
+    const w = (x: string) => proxyWord(x, platform);
+    return [w(o.nodePath), w(o.cliPath), 'sandbox', 'ssh-proxy', o.id, '--public-key', w(keyPath(o.home) + '.pub'), ...(o.extra || []).map(w)].join(' ');
 }
 
 /** Options shared by the config block and `singularity sandbox ssh` (inline -o). */
@@ -122,6 +142,9 @@ export function renderBlock(o: BlockOpts): string {
         `# Managed by 'singularity sandbox ssh-config'. Remove with: singularity sandbox ssh-config ${o.id.slice(0, 8)} --remove`,
         `Host ${o.alias}`,
         ...sshOptions(o).map(([k, v]) => `  ${k} ${v}`),
+        // Lines below this block in ~/.ssh/config apply to every host again (they used to be
+        // global before the block was put on top: Include, IdentityFile, User, ...).
+        'Match all',
         END(o.id),
         '',
     ].join('\n');
@@ -272,12 +295,14 @@ export function selfPaths(): { nodePath: string; cliPath: string } {
 /** ProxyCommand extras: only what differs from the defaults (never a secret). */
 export function proxyExtras(flags: Flags): string[] {
     const out: string[] = [];
-    if (typeof flags.keypair === 'string') out.push('--keypair', sshPath(flags.keypair));
-    if (typeof flags['compute-url'] === 'string') out.push('--compute-url', sshPath(flags['compute-url']));
+    // Absolute: an editor runs the ProxyCommand from another folder.
+    if (typeof flags.keypair === 'string') out.push('--keypair', resolve(flags.keypair));
+    if (typeof flags['compute-url'] === 'string') out.push('--compute-url', flags['compute-url']);
     return out;
 }
 
 export function sshConfigCommand(id: string, name: string | null, flags: Flags, creds: Creds, home = homedir()): void {
+    assertSandboxId(id);
     const cfgPath = join(home, '.ssh', 'config');
     const existing = existsSync(cfgPath) ? readFileSync(cfgPath, 'utf8') : '';
     if (flags.remove) {
@@ -313,11 +338,13 @@ export function sshConfigCommand(id: string, name: string | null, flags: Flags, 
 }
 
 export async function sshCommand(id: string, flags: Flags, extraArgs: string[], home = homedir()): Promise<void> {
+    assertSandboxId(id);
     ensureKeypair(home);
     const { nodePath, cliPath } = selfPaths();
     const opts = sshOptions({ id, alias: '', nodePath, cliPath, home, extra: proxyExtras(flags) });
     // ssh parses -o exactly like a config line, so the same quoted values work here.
-    const args = [...opts.flatMap(([k, v]) => ['-o', `${k} ${v}`]), ...extraArgs, `sgl-sandbox-${id}`];
+    // The destination first: ssh still reads options after it (-L ...), and the rest is the command.
+    const args = [...opts.flatMap(([k, v]) => ['-o', `${k} ${v}`]), `sgl-sandbox-${id}`, ...extraArgs];
     const p = spawn('ssh', args, { stdio: 'inherit' });
     await new Promise<void>((resolve) => {
         p.on('error', () => { process.stderr.write('error: could not run ssh. Install OpenSSH (it comes with macOS, Linux and Windows 10+).\n'); process.exitCode = 1; resolve(); });

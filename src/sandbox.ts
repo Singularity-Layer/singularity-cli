@@ -70,9 +70,11 @@ model "agent-pod". Each request is one turn of the sandbox's coding agent.`;
  * the key ssh-config saved (editors run ssh-proxy without your shell's environment), then the
  * default Solana keypair.
  */
-export function loadSandboxCreds(flags: Flags, saved: () => string | null = savedApiKey): Creds {
+export function loadSandboxCreds(flags: Flags, saved: () => string | null = savedApiKey, useSaved = false): Creds {
     const envKey = (process.env.SGL_API_KEY || process.env.SINGULARITY_API_KEY || '').trim();
-    if ('api-key' in flags || envKey || typeof flags.keypair === 'string') return loadCreds(flags);
+    // The saved key is for ssh-proxy only (an editor runs it without your environment); every
+    // other command keeps the usual order, so nothing silently switches account.
+    if (!useSaved || 'api-key' in flags || envKey || typeof flags.keypair === 'string') return loadCreds(flags);
     const k = saved();
     return k ? { apiKey: k } : loadCreds(flags);
 }
@@ -394,7 +396,7 @@ const out = (ctx: Ctx, human: string, data: unknown) => ok(ctx.json ? JSON.strin
 export async function run(words: string[], flags: Flags): Promise<void> {
     const sub = words[0];
     if (!sub || flags.help) { ok(HELP); if (!sub) process.exit(1); return; }
-    const ctx: Ctx = { base: computeBase(flags), creds: loadSandboxCreds(flags), json: !!flags.json };
+    const ctx: Ctx = { base: computeBase(flags), creds: loadSandboxCreds(flags, savedApiKey, sub === 'ssh-proxy'), json: !!flags.json };
     const args = words.slice(1);
     const sref = typeof flags.sandbox === 'string' ? flags.sandbox : undefined;
 

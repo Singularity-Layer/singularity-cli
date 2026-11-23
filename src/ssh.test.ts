@@ -3,7 +3,11 @@
  * tunnel itself was proven against production on a test sandbox (see the PR).
  */
 import { describe, it, expect } from 'vitest';
-import { renderBlock, upsertBlock, aliasesInUse, hostAlias, sshPath, proxyCommand, isWaitError, keyPath, sshOptions } from './ssh.js';
+import { renderBlock, upsertBlock, aliasesInUse, hostAlias, sshPath, proxyCommand, proxyWord, isWaitError, keyPath, sshOptions } from './ssh.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ApiError, loadSandboxCreds } from './sandbox.js';
 
 const ID = '9f19b672-8951-4d86-b9b1-e5b4fac92b84';
@@ -16,7 +20,11 @@ describe('ssh config block', () => {
         expect(b.split('\n')[0]).toBe(`# >>> singularity sandbox ${ID} >>>`);
         expect(b).toContain('\nHost sgl-test\n');
         expect(b).toContain('  User node\n');
-        expect(b).toContain(`  ProxyCommand "/usr/local/bin/node" "/opt/lib/node_modules/@singularity-layer/cli/dist/cli.js" sandbox ssh-proxy ${ID} --public-key "/Users/me/.singularity/ssh/id_ed25519.pub"\n`);
+        const pc = process.platform === 'win32'
+            ? `"/usr/local/bin/node" "/opt/lib/node_modules/@singularity-layer/cli/dist/cli.js" sandbox ssh-proxy ${ID} --public-key "/Users/me/.singularity/ssh/id_ed25519.pub"`
+            : `'/usr/local/bin/node' '/opt/lib/node_modules/@singularity-layer/cli/dist/cli.js' sandbox ssh-proxy ${ID} --public-key '/Users/me/.singularity/ssh/id_ed25519.pub'`;
+        expect(b).toContain(`  ProxyCommand ${pc}\n`);
+        expect(b).toContain('\nMatch all\n# <<< singularity sandbox');
         expect(b).toContain('  IdentityFile "/Users/me/.singularity/ssh/id_ed25519"\n');
         expect(b).toContain('  IdentitiesOnly yes\n');
         expect(b).toContain(`  HostKeyAlias sgl-sandbox-${ID}\n`);
@@ -30,7 +38,10 @@ describe('ssh config block', () => {
         expect(sshPath('C:\\Users\\Me Me\\node.exe')).toBe('"C:/Users/Me Me/node.exe"');
         expect(sshPath('/a/100%/b')).toBe('"/a/100%%/b"');
         expect(sshPath('/a"\nProxyCommand evil\n/b')).toBe('"/aProxyCommand evil/b"');   // no line break into the config
-        expect(proxyCommand({ id: ID, nodePath: 'C:\\n\\node.exe', cliPath: 'C:\\c\\cli.js', home: 'C:\\Users\\me' })).toContain('"C:/Users/me/.singularity/ssh/id_ed25519.pub"');
+        expect(proxyCommand({ id: ID, nodePath: 'C:\\n\\node.exe', cliPath: 'C:\\c\\cli.js', home: 'C:\\Users\\me' }, 'win32')).toContain('"C:/n/node.exe" "C:/c/cli.js"');
+        // POSIX: the shell never expands anything in our paths.
+        expect(proxyWord("/a/$(x)/`y`/it's", 'darwin')).toBe("'/a/$(x)/`y`/it'\\''s'");
+        expect(() => proxyCommand({ id: 'x; rm -rf ~', nodePath: 'n', cliPath: 'c', home: '/h' }, 'darwin')).toThrow();
         expect(keyPath('/h')).toBe('/h/.singularity/ssh/id_ed25519');
     });
     it('goes at the top, replaces its own old block, never touches the rest, and can be removed', () => {
@@ -53,6 +64,21 @@ describe('ssh config block', () => {
         expect(hostAlias(ID, '  !!! ')).toBe('sgl-9f19b672');
         expect(hostAlias(ID, null)).toBe('sgl-9f19b672');
         expect(hostAlias(ID, 'a'.repeat(80))).toBe('sgl-' + 'a'.repeat(32));
+    });
+    it('a global option at the top of the user config still applies to other hosts (ssh -G)', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'sgl-sshcfg-'));
+        try {
+            const user = 'User globaluser\nIdentityFile ~/.ssh/id_work\n\nHost work\n  HostName w.example\n';
+            const cfg = join(dir, 'config');
+            writeFileSync(cfg, upsertBlock(user, ID, renderBlock({ id: ID, alias: 'sgl-a', ...base })));
+            let g: string;
+            try { g = execFileSync('ssh', ['-G', '-F', cfg, 'github.com'], { encoding: 'utf8' }); } catch { return; }   // no ssh here
+            expect(g).toMatch(/^user globaluser$/m);
+            expect(g).toMatch(/^identityfile ~\/\.ssh\/id_work$/m);
+            const ours = execFileSync('ssh', ['-G', '-F', cfg, 'sgl-a'], { encoding: 'utf8' });
+            expect(ours).toMatch(/^user node$/m);
+            expect(ours).toMatch(/^identitiesonly yes$/m);
+        } finally { rmSync(dir, { recursive: true, force: true }); }
     });
     it('the inline ssh options are the same as the block (one source)', () => {
         const opts = Object.fromEntries(sshOptions({ id: ID, alias: '', ...base }));
@@ -79,10 +105,13 @@ describe('credentials for sandbox commands', () => {
     it('flag and env beat the saved key; the saved key beats the default keypair', () => {
         try {
             delete process.env.SGL_API_KEY; delete process.env.SINGULARITY_API_KEY;
-            expect(loadSandboxCreds({}, () => 'x402c_saved')).toEqual({ apiKey: 'x402c_saved' });
-            expect(loadSandboxCreds({ 'api-key': 'x402c_flag' }, () => 'x402c_saved')).toEqual({ apiKey: 'x402c_flag' });
+            expect(loadSandboxCreds({}, () => 'x402c_saved', true)).toEqual({ apiKey: 'x402c_saved' });
+            // Other commands never pick the saved key up (no silent account switch).
+            expect(loadSandboxCreds({ 'api-key': 'x402c_flag' }, () => 'x402c_saved', true)).toEqual({ apiKey: 'x402c_flag' });
             process.env.SGL_API_KEY = 'x402c_env';
-            expect(loadSandboxCreds({}, () => 'x402c_saved')).toEqual({ apiKey: 'x402c_env' });
+            expect(loadSandboxCreds({}, () => 'x402c_saved', true)).toEqual({ apiKey: 'x402c_env' });
+            // Other commands never pick the saved key up (no silent account switch).
+            expect(loadSandboxCreds({}, () => { throw new Error('read the saved key'); }, false)).toEqual({ apiKey: 'x402c_env' });
         } finally { restore(); }
     });
 });
