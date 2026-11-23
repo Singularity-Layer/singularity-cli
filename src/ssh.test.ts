@@ -29,6 +29,7 @@ describe('ssh config block', () => {
     it('Windows paths become forward slashes; % is escaped for ssh tokens', () => {
         expect(sshPath('C:\\Users\\Me Me\\node.exe')).toBe('"C:/Users/Me Me/node.exe"');
         expect(sshPath('/a/100%/b')).toBe('"/a/100%%/b"');
+        expect(sshPath('/a"\nProxyCommand evil\n/b')).toBe('"/aProxyCommand evil/b"');   // no line break into the config
         expect(proxyCommand({ id: ID, nodePath: 'C:\\n\\node.exe', cliPath: 'C:\\c\\cli.js', home: 'C:\\Users\\me' })).toContain('"C:/Users/me/.singularity/ssh/id_ed25519.pub"');
         expect(keyPath('/h')).toBe('/h/.singularity/ssh/id_ed25519');
     });

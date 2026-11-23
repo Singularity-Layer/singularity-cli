@@ -69,7 +69,8 @@ export function ensureKeypair(home = homedir()): string {
 
 /** A path inside ssh_config: forward slashes, quoted, and '%' doubled (ssh expands %-tokens). */
 export function sshPath(p: string): string {
-    return '"' + p.replace(/\\/g, '/').replace(/%/g, '%%').replace(/"/g, '') + '"';
+    // eslint-disable-next-line no-control-regex
+    return '"' + p.replace(/\\/g, '/').replace(/%/g, '%%').replace(/["\u0000-\u001f\u007f]/g, '') + '"';
 }
 
 /** `sgl-<name>` from the sandbox name (or its id), only [a-z0-9-]. */
