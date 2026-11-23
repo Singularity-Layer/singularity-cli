@@ -289,7 +289,25 @@ export async function sshProxy(ctx: Ctx, id: string, publicKeyFile: string): Pro
 export function selfPaths(): { nodePath: string; cliPath: string } {
     let cli = process.argv[1] || '';
     try { cli = realpathSync(cli); } catch { /* keep as is */ }
-    return { nodePath: process.execPath, cliPath: cli };
+    return { nodePath: stableNodePath(), cliPath: cli };
+}
+
+/**
+ * The node on PATH when it is this same binary (e.g. /opt/homebrew/bin/node), not the versioned
+ * path it resolves to (/opt/homebrew/Cellar/node/26.5.0_1/...), which an upgrade deletes.
+ */
+export function stableNodePath(): string {
+    const exe = process.execPath;
+    const dirs = String(process.env.PATH || '').split(process.platform === 'win32' ? ';' : ':');
+    const name = process.platform === 'win32' ? 'node.exe' : 'node';
+    let real = exe;
+    try { real = realpathSync(exe); } catch { /* keep */ }
+    for (const d of dirs) {
+        if (!d) continue;
+        const cand = join(d, name);
+        try { if (realpathSync(cand) === real) return cand; } catch { /* not there */ }
+    }
+    return exe;
 }
 
 /** ProxyCommand extras: only what differs from the defaults (never a secret). */

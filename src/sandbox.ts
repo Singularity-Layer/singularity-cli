@@ -52,9 +52,9 @@ usage: singularity sandbox <subcommand> [sandbox] [options]
 Leave it out if you have only one.
 
 auth:  SGL_API_KEY=x402c_...   a compute API key from Settings > API keys. connect, ssh, exec,
-                                files and key need the Agent Pods permission "Read and write pod
-                                files, install skills, create and restore backups"
-                                (pods:control:write). ssh-config saves the key it was run with to
+                                files and key need Compute "Extend, resize, destroy"
+                                (compute:write) and Agent Pods "Read and write pod files,
+                                install skills, create and restore backups" (pods:control:write). ssh-config saves the key it was run with to
                                 ~/.singularity/credentials.json (mode 600) so editors can connect.
        --keypair <path>         or sign with a Solana keypair (default ~/.config/solana/id.json)
        --compute-url <url>      another API base (default ${DEFAULT_COMPUTE})
@@ -164,6 +164,9 @@ const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export function explain(e: unknown): string {
     if (!(e instanceof ApiError)) return e instanceof Error ? e.message : String(e);
     if (e.status === 401) return `${e.message}. Check SGL_API_KEY (or your keypair).`;
+    if (e.status === 403 && /compute:write/.test(e.message + JSON.stringify(e.details))) {
+        return `${e.message}\n  connect, ssh, exec and key need a key with two permissions, ticked in Settings > API keys:\n  Compute "Extend, resize, destroy" (compute:write) and Agent Pods "Read and write pod files" (pods:control:write).`;
+    }
     if (e.status === 403 && /pods:control:write/.test(e.message + JSON.stringify(e.details))) {
         return `${e.message}\n  Create a key in Settings > API keys and tick, under Agent Pods, "Read and write pod files,\n  install skills, create and restore backups" (pods:control:write). Use it as SGL_API_KEY.`;
     }
