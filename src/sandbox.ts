@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import nacl from 'tweetnacl';
 import { loadCreds, die, ok, type Flags, type Creds } from './auth.js';
+import { sshProxy, sshConfigCommand, sshCommand, savedApiKey, keyPath } from './ssh.js';
 
 const DEFAULT_COMPUTE = 'https://compute.x402layer.cc';
 /** The sandbox file API takes text up to this size (the request body cap is 128 KiB, JSON-escaped). */
@@ -31,6 +32,12 @@ usage: singularity sandbox <subcommand> [sandbox] [options]
   status [sandbox]              state, harness, awake hours this month
   connect [sandbox]             open the sandbox's terminal here (a full shell)
                                 type ~. at the start of a line to disconnect
+  ssh-config [sandbox]          set up real SSH: ssh, scp, sftp, port forwarding, and
+                                VS Code / Cursor Remote-SSH (writes a Host entry in ~/.ssh/config)
+       --host <name>            the name to use with ssh (default sgl-<sandbox name>)
+       --print | --remove       show the entry instead of writing it | take it out again
+  ssh [sandbox] [-- ssh args]   ssh into the sandbox now (no config needed), e.g. -- -L 3000:localhost:3000
+  ssh-proxy <sandbox>           the ProxyCommand ssh-config uses (you do not run this yourself)
   exec [sandbox] -- <command>   run one command, print its output, exit with its code
        --timeout <seconds>      1 to 300 (default 60)
   files [sandbox]               list the files in the workspace
@@ -44,10 +51,11 @@ usage: singularity sandbox <subcommand> [sandbox] [options]
 [sandbox] is the sandbox id, the start of it, or its name (or pass --sandbox <it>).
 Leave it out if you have only one.
 
-auth:  SGL_API_KEY=x402c_...   a compute API key from Settings > API keys. connect, exec, files
-                                and key need the Agent Pods permission "Read and write pod
+auth:  SGL_API_KEY=x402c_...   a compute API key from Settings > API keys. connect, ssh, exec,
+                                files and key need the Agent Pods permission "Read and write pod
                                 files, install skills, create and restore backups"
-                                (pods:control:write).
+                                (pods:control:write). ssh-config saves the key it was run with to
+                                ~/.singularity/credentials.json (mode 600) so editors can connect.
        --keypair <path>         or sign with a Solana keypair (default ~/.config/solana/id.json)
        --compute-url <url>      another API base (default ${DEFAULT_COMPUTE})
        --json                   machine-readable output
@@ -56,6 +64,18 @@ OpenAI-compatible address: after 'key', point any OpenAI client at the printed b
 model "agent-pod". Each request is one turn of the sandbox's coding agent.`;
 
 // ─── HTTP ───────────────────────────────────────────────────────────────────
+
+/**
+ * Credentials for sandbox commands: --api-key, then SGL_API_KEY, then an explicit --keypair, then
+ * the key ssh-config saved (editors run ssh-proxy without your shell's environment), then the
+ * default Solana keypair.
+ */
+export function loadSandboxCreds(flags: Flags, saved: () => string | null = savedApiKey): Creds {
+    const envKey = (process.env.SGL_API_KEY || process.env.SINGULARITY_API_KEY || '').trim();
+    if ('api-key' in flags || envKey || typeof flags.keypair === 'string') return loadCreds(flags);
+    const k = saved();
+    return k ? { apiKey: k } : loadCreds(flags);
+}
 
 export function computeBase(flags: Flags): string {
     const override = (typeof flags['compute-url'] === 'string' && flags['compute-url']) || process.env.SINGULARITY_COMPUTE_URL;
@@ -374,7 +394,7 @@ const out = (ctx: Ctx, human: string, data: unknown) => ok(ctx.json ? JSON.strin
 export async function run(words: string[], flags: Flags): Promise<void> {
     const sub = words[0];
     if (!sub || flags.help) { ok(HELP); if (!sub) process.exit(1); return; }
-    const ctx: Ctx = { base: computeBase(flags), creds: loadCreds(flags), json: !!flags.json };
+    const ctx: Ctx = { base: computeBase(flags), creds: loadSandboxCreds(flags), json: !!flags.json };
     const args = words.slice(1);
     const sref = typeof flags.sandbox === 'string' ? flags.sandbox : undefined;
 
@@ -398,9 +418,32 @@ export async function run(words: string[], flags: Flags): Promise<void> {
             ].join('\n'), c);
             break;
         }
-        case 'connect': case 'shell': case 'ssh': {
+        case 'connect': case 'shell': {
             const id = await resolveId(ctx, sref || args[0]);
             await connect(ctx, id);
+            break;
+        }
+        case 'ssh-proxy': {
+            // ssh's ProxyCommand: stdout IS the SSH stream, so nothing else may ever be printed there.
+            const ref = sref || args[0];
+            if (!ref || !UUID.test(ref)) { process.stderr.write('error: ssh-proxy needs the full sandbox id (singularity sandbox ssh-config writes it for you)\n'); process.exit(255); }
+            const pub = typeof flags['public-key'] === 'string' ? flags['public-key'] : keyPath() + '.pub';
+            await sshProxy(ctx, ref.toLowerCase(), pub);
+            break;
+        }
+        case 'ssh-config': {
+            const id = await resolveId(ctx, sref || args[0]);
+            const rows = await listSandboxes(ctx).catch(() => [] as SandboxRow[]);
+            sshConfigCommand(id, rows.find((r) => r.id === id)?.name ?? null, flags, ctx.creds);
+            break;
+        }
+        case 'ssh': {
+            // `ssh [sandbox] [-- ssh args...]`
+            const sep = typeof flags['--'] === 'string' ? Number(flags['--']) - 2 : -1;
+            const ref = sref || (sep !== 0 ? args[0] : undefined);
+            const extra = sep >= 0 ? args.slice(sep) : [];
+            const id = await resolveId(ctx, ref);
+            await sshCommand(id, flags, extra);
             break;
         }
         case 'exec': {
