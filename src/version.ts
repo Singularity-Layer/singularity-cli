@@ -8,4 +8,4 @@
  *
  * Kept in sync with package.json by the release workflow, which is the only thing that bumps either.
  */
-export const VERSION = '0.5.1';
+export const VERSION = '0.6.0';

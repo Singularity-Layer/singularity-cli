@@ -21,7 +21,7 @@ import { VERSION } from './version.js';
 
 const COMMANDS: Record<string, { run: (words: string[], flags: Flags) => Promise<void>; blurb: string }> = {
     processors: { run: processors.run, blurb: 'deploy loops we host and run on demand' },
-    sandbox: { run: sandbox.run, blurb: 'use your Coding sandbox: terminal, exec, files, OpenAI-compatible key' },
+    sandbox: { run: sandbox.run, blurb: 'use your Coding sandbox: terminal, SSH / VS Code, exec, files, OpenAI-compatible key' },
 };
 
 const HELP = `singularity ${VERSION} — build on the Singularity Cloud Network

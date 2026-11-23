@@ -109,7 +109,7 @@ hard-coding the secret in their source, which is worse in every way.
 
 Use your Coding sandbox (Claude Code, Codex, OpenCode or Pi on its own private computer) from your
 own terminal. It is the same secure path the browser terminal uses: a single-use, 60-second ticket
-and a WebSocket relayed through the sandbox's own outbound connection. No SSH, no open port.
+and a WebSocket relayed through the sandbox's own outbound connection. No open port.
 
 ```bash
 export SGL_API_KEY=x402c_...              # see Permissions below
@@ -126,13 +126,33 @@ A sleeping sandbox wakes by itself when you connect or run something. `connect` 
 newer (it uses the built-in WebSocket). With more than one sandbox, name it: its id, the first few
 characters of the id, or its name (`singularity sandbox connect 99a7`).
 
+**SSH, VS Code and Cursor** (0.6.0). Real SSH: `ssh`, `scp`, `sftp`, port forwarding, and VS Code
+or Cursor Remote-SSH. There is no SSH port: this CLI is ssh's ProxyCommand.
+
+```bash
+singularity sandbox ssh-config <sandbox-id>   # key + a Host entry in ~/.ssh/config; prints the name
+ssh sgl-my-sandbox                            # a shell as the sandbox user
+scp ./data.csv sgl-my-sandbox:workspace/
+ssh -L 3000:localhost:3000 sgl-my-sandbox
+singularity sandbox ssh <sandbox-id> -- -L 3000:localhost:3000   # the same with no config
+```
+
+Each connection gets a single-use ticket bound to your public key (`~/.singularity/ssh/id_ed25519`,
+made by `ssh-config`; the private half never leaves your machine), and the sandbox starts an SSH
+server for that one connection that accepts only that key. No passwords; agent and X11 forwarding
+off. Editors start ssh without your shell's environment, so `ssh-config` saves the API key it ran
+with to `~/.singularity/credentials.json` (mode 600; only `ssh-proxy` reads it; `--no-save-key`
+skips it). In VS Code / Cursor: Remote - SSH > Connect to Host, and set
+`"remote.SSH.connectTimeout": 60` (a sleeping sandbox takes a few seconds to wake). An open
+connection keeps the sandbox awake. `ssh-config <id> --remove` takes the entry out.
+
 **OpenAI-compatible address.** `singularity sandbox key` prints a key and a base URL like
 `https://compute.x402layer.cc/pods/<id>/v1`. Point any OpenAI client at it with model `agent-pod`;
 each request is one turn of the sandbox's coding agent (streaming works). The agent can run commands
 on the sandbox, so treat the key like a password. `keys` lists them, `revoke-key` turns one off.
 
-Permissions: the terminal, exec, files and keys all need a compute API key (Settings > API keys)
-with the Agent Pods permission "Read and write pod files, install skills, create and restore
+Permissions: the terminal, SSH, exec, files and keys all need a compute API key (Settings > API keys)
+with Compute "Extend, resize, destroy" (compute:write) and the Agent Pods permission "Read and write pod files, install skills, create and restore
 backups" (`pods:control:write`), or a keypair. Keys from a Google, GitHub or X login can use `connect`, `key`
 and `keys`; `exec`, `files`, `get` and `put` need a key from a wallet login.
 
